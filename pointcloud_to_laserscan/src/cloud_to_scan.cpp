@@ -40,7 +40,7 @@
 
 namespace pointcloud_to_laserscan
 {
-  typedef pcl::PointCloud<pcl::PointXYZRGB> PointCloud;
+  typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
 
   class CloudToScan : public nodelet::Nodelet
   {
@@ -68,6 +68,12 @@ namespace pointcloud_to_laserscan
       {
         //fist, we want to transform the point cloud, but only if its in a different frame
         PointCloud transformed_cloud;
+        if(!tf_listener_.waitForTransform(laser_frame_id_, cloud->header.frame_id, cloud->header.stamp, ros::Duration(0.2)))
+        {
+          ROS_ERROR("Failed to get a transform for the pointcloud in time, doing nothing");
+          return;
+        }
+
         pcl_ros::transformPointCloud(laser_frame_id_, *cloud, transformed_cloud, tf_listener_);
 
         sensor_msgs::LaserScanPtr output(new sensor_msgs::LaserScan());
@@ -97,17 +103,20 @@ namespace pointcloud_to_laserscan
             NODELET_DEBUG("rejected for nan in point(%f, %f, %f)\n", x, y, z);
             continue;  
           }
+
           if (z > max_height_ || z < min_height_)
           {
             NODELET_DEBUG("rejected for height %f not in range (%f, %f)\n", z, min_height_, max_height_);
             continue;
           }
-          double angle = -atan2(y, -x);
+
+          double angle = atan2(y, x);
           if (angle < output->angle_min || angle > output->angle_max)
           {
             NODELET_DEBUG("rejected for angle %f not in range (%f, %f)\n", angle, output->angle_min, output->angle_max);
             continue;
           }
+
           int index = (angle - output->angle_min) / output->angle_increment;
           //printf ("index xyz( %f %f %f) angle %f index %d\n", x, y, z, angle, index);
           double range_sq = x*x+y*y;
