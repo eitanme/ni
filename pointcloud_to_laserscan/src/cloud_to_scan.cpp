@@ -58,6 +58,7 @@ namespace pointcloud_to_laserscan
 
         private_nh.getParam("min_height", min_height_);
         private_nh.getParam("max_height", max_height_);
+        private_nh.getParam("max_range", max_range_);
 
         private_nh.getParam("laser_frame_id", laser_frame_id_);
         pub_ = nh.advertise<sensor_msgs::LaserScan>("scan", 10);
@@ -120,7 +121,7 @@ namespace pointcloud_to_laserscan
           int index = (angle - output->angle_min) / output->angle_increment;
           //printf ("index xyz( %f %f %f) angle %f index %d\n", x, y, z, angle, index);
           double range_sq = x*x+y*y;
-          if (output->ranges[index] * output->ranges[index] > range_sq)
+          if (output->ranges[index] * output->ranges[index] > range_sq && range_sq < max_range_ * max_range_)
             output->ranges[index] = sqrt(range_sq);
 
         }
@@ -128,7 +129,7 @@ namespace pointcloud_to_laserscan
       }
 
 
-      double min_height_, max_height_;
+      double min_height_, max_height_, max_range_;
       std::string laser_frame_id_;
 
       ros::Publisher pub_;
