@@ -31,12 +31,16 @@
 #include "pluginlib/class_list_macros.h"
 #include "nodelet/nodelet.h"
 #include "sensor_msgs/LaserScan.h"
+#include "sensor_msgs/PointCloud2.h"
 #include "pcl/point_cloud.h"
 #include "pcl_ros/point_cloud.h"
 #include "pcl/point_types.h"
 #include "pcl/ros/conversions.h"
 
 #include "pcl_ros/transforms.h"
+#include "pcl/filters/voxel_grid.h"
+
+#include <deque>
 
 namespace pointcloud_to_laserscan
 {
@@ -46,7 +50,7 @@ namespace pointcloud_to_laserscan
   {
     public:
       //Constructor
-      CloudToScan(): min_height_(0.10), max_height_(0.15), laser_frame_id_("/openi_depth_frame")
+      CloudToScan(): min_height_(0.10), max_height_(0.15), laser_frame_id_("/openi_depth_frame"), max_buffer_size_(120), grid_size_(0.01), buffer_time_(4.0)
     {
     };
 
@@ -59,29 +63,52 @@ namespace pointcloud_to_laserscan
         private_nh.getParam("min_height", min_height_);
         private_nh.getParam("max_height", max_height_);
         private_nh.getParam("max_range", max_range_);
+        private_nh.getParam("max_buffer_size", max_buffer_size_);
+        private_nh.getParam("grid_size", grid_size_);
+        private_nh.getParam("buffer_time", buffer_time_);
 
         private_nh.getParam("laser_frame_id", laser_frame_id_);
         pub_ = nh.advertise<sensor_msgs::LaserScan>("scan", 10);
-        sub_ = nh.subscribe<PointCloud>("cloud", 10, &CloudToScan::callback, this);
+        sub_ = nh.subscribe<sensor_msgs::PointCloud2>("cloud", 10, &CloudToScan::callback, this);
       }
 
-      void callback(const PointCloud::ConstPtr& cloud)
+      void callback(const sensor_msgs::PointCloud2::ConstPtr& cloud)
       {
+        //first, let's downsample the pointcloud
+        sensor_msgs::PointCloud2 downsampled_cloud;
+        downsampled_cloud.header = cloud->header;
+        pcl::VoxelGrid<sensor_msgs::PointCloud2> voxel_filter;
+        voxel_filter.setInputCloud(cloud);
+        voxel_filter.setLeafSize(grid_size_, grid_size_, grid_size_);
+        voxel_filter.filter(downsampled_cloud);
+
+        PointCloud pcl_cloud;
+        pcl::fromROSMsg(downsampled_cloud, pcl_cloud);
+
         //fist, we want to transform the point cloud, but only if its in a different frame
         PointCloud transformed_cloud;
-        if(!tf_listener_.waitForTransform(laser_frame_id_, cloud->header.frame_id, cloud->header.stamp, ros::Duration(0.2)))
+        if(!tf_listener_.waitForTransform(laser_frame_id_, pcl_cloud.header.frame_id, pcl_cloud.header.stamp, ros::Duration(0.2)))
         {
           ROS_ERROR("Failed to get a transform for the pointcloud in time, doing nothing");
           return;
         }
 
-        pcl_ros::transformPointCloud(laser_frame_id_, *cloud, transformed_cloud, tf_listener_);
+        pcl_ros::transformPointCloud(laser_frame_id_, pcl_cloud, transformed_cloud, tf_listener_);
+
+        //if our buffer is too big, we need to pop a cloud off
+        if(pc_buffer_.size() >= (unsigned int)max_buffer_size_)
+        {
+          pc_buffer_.pop_back();
+        }
+
+        //push the latest cloud onto the deque
+        pc_buffer_.push_front(transformed_cloud);
 
         sensor_msgs::LaserScanPtr output(new sensor_msgs::LaserScan());
         NODELET_DEBUG("Got cloud");
         //Copy Header
-        output->header = transformed_cloud.header;
-        output->header.frame_id = laser_frame_id_;
+        output->header.stamp = ros::Time::now();
+        output->header.frame_id = "base_footprint";
         output->angle_min = -M_PI/2;
         output->angle_max = M_PI/2;
         output->angle_increment = M_PI/180.0/2.0;
@@ -93,37 +120,46 @@ namespace pointcloud_to_laserscan
         uint32_t ranges_size = std::ceil((output->angle_max - output->angle_min) / output->angle_increment);
         output->ranges.assign(ranges_size, output->range_max + 1.0);
 
-        for (PointCloud::const_iterator it = transformed_cloud.begin(); it != transformed_cloud.end(); ++it)
+        for(unsigned int i = 0; i < pc_buffer_.size(); ++i)
         {
-          const float &x = it->x;
-          const float &y = it->y;
-          const float &z = it->z;
+          //check if we've gone too far back in time
+          if(ros::Time::now() > pc_buffer_[i].header.stamp + ros::Duration(buffer_time_))
+            break;
 
-          if ( std::isnan(x) || std::isnan(y) || std::isnan(z) )
+          PointCloud base_footprint_cloud;
+          pcl_ros::transformPointCloud("base_footprint", ros::Time(), pc_buffer_[i], pc_buffer_[i].header.frame_id, base_footprint_cloud, tf_listener_);
+          for (PointCloud::const_iterator it = base_footprint_cloud.begin(); it != base_footprint_cloud.end(); ++it)
           {
-            NODELET_DEBUG("rejected for nan in point(%f, %f, %f)\n", x, y, z);
-            continue;  
+            const float &x = it->x;
+            const float &y = it->y;
+            const float &z = it->z;
+
+            if ( std::isnan(x) || std::isnan(y) || std::isnan(z) )
+            {
+              NODELET_DEBUG("rejected for nan in point(%f, %f, %f)\n", x, y, z);
+              continue;  
+            }
+
+            if (z > max_height_ || z < min_height_)
+            {
+              NODELET_DEBUG("rejected for height %f not in range (%f, %f)\n", z, min_height_, max_height_);
+              continue;
+            }
+
+            double angle = atan2(y, x);
+            if (angle < output->angle_min || angle > output->angle_max)
+            {
+              NODELET_DEBUG("rejected for angle %f not in range (%f, %f)\n", angle, output->angle_min, output->angle_max);
+              continue;
+            }
+
+            int index = (angle - output->angle_min) / output->angle_increment;
+            //printf ("index xyz( %f %f %f) angle %f index %d\n", x, y, z, angle, index);
+            double range_sq = x*x+y*y;
+            if (output->ranges[index] * output->ranges[index] > range_sq && range_sq < max_range_ * max_range_ && range_sq > output->range_min * output->range_min)
+              output->ranges[index] = sqrt(range_sq);
+
           }
-
-          if (z > max_height_ || z < min_height_)
-          {
-            NODELET_DEBUG("rejected for height %f not in range (%f, %f)\n", z, min_height_, max_height_);
-            continue;
-          }
-
-          double angle = atan2(y, x);
-          if (angle < output->angle_min || angle > output->angle_max)
-          {
-            NODELET_DEBUG("rejected for angle %f not in range (%f, %f)\n", angle, output->angle_min, output->angle_max);
-            continue;
-          }
-
-          int index = (angle - output->angle_min) / output->angle_increment;
-          //printf ("index xyz( %f %f %f) angle %f index %d\n", x, y, z, angle, index);
-          double range_sq = x*x+y*y;
-          if (output->ranges[index] * output->ranges[index] > range_sq && range_sq < max_range_ * max_range_)
-            output->ranges[index] = sqrt(range_sq);
-
         }
         pub_.publish(output);
       }
@@ -135,7 +171,10 @@ namespace pointcloud_to_laserscan
       ros::Publisher pub_;
       ros::Subscriber sub_;
       tf::TransformListener tf_listener_;
-
+      std::deque<PointCloud> pc_buffer_;
+      int max_buffer_size_;
+      double grid_size_;
+      double buffer_time_;
   };
 
   PLUGINLIB_DECLARE_CLASS(pointcloud_to_laserscan, CloudToScan, pointcloud_to_laserscan::CloudToScan, nodelet::Nodelet);
