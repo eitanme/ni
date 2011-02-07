@@ -50,7 +50,7 @@ namespace pointcloud_to_laserscan
   {
     public:
       //Constructor
-      CloudToScan(): min_height_(0.10), max_height_(0.15), laser_frame_id_("/openi_depth_frame"), max_buffer_size_(120), grid_size_(0.01), buffer_time_(4.0)
+      CloudToScan(): min_height_(0.10), max_height_(0.15), buffer_frame_id_("odom_combined"), base_frame_id_("base_footprint"), max_buffer_size_(120), grid_size_(0.01), buffer_time_(4.0)
     {
     };
 
@@ -67,7 +67,8 @@ namespace pointcloud_to_laserscan
         private_nh.getParam("grid_size", grid_size_);
         private_nh.getParam("buffer_time", buffer_time_);
 
-        private_nh.getParam("laser_frame_id", laser_frame_id_);
+        private_nh.getParam("buffer_frame_id", buffer_frame_id_);
+        private_nh.getParam("base_frame_id", base_frame_id_);
         pub_ = nh.advertise<sensor_msgs::LaserScan>("scan", 10);
         sub_ = nh.subscribe<sensor_msgs::PointCloud2>("cloud", 10, &CloudToScan::callback, this);
       }
@@ -87,13 +88,13 @@ namespace pointcloud_to_laserscan
 
         //fist, we want to transform the point cloud, but only if its in a different frame
         PointCloud transformed_cloud;
-        if(!tf_listener_.waitForTransform(laser_frame_id_, pcl_cloud.header.frame_id, pcl_cloud.header.stamp, ros::Duration(0.2)))
+        if(!tf_listener_.waitForTransform(buffer_frame_id_, pcl_cloud.header.frame_id, pcl_cloud.header.stamp, ros::Duration(0.2)))
         {
           ROS_ERROR("Failed to get a transform for the pointcloud in time, doing nothing");
           return;
         }
 
-        pcl_ros::transformPointCloud(laser_frame_id_, pcl_cloud, transformed_cloud, tf_listener_);
+        pcl_ros::transformPointCloud(buffer_frame_id_, pcl_cloud, transformed_cloud, tf_listener_);
 
         //if our buffer is too big, we need to pop a cloud off
         if(pc_buffer_.size() >= (unsigned int)max_buffer_size_)
@@ -166,7 +167,7 @@ namespace pointcloud_to_laserscan
 
 
       double min_height_, max_height_, max_range_;
-      std::string laser_frame_id_;
+      std::string buffer_frame_id_, base_frame_id_;
 
       ros::Publisher pub_;
       ros::Subscriber sub_;
