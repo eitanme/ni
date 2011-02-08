@@ -148,11 +148,11 @@ public:
         float disp = disparity.at<float>(v, u);
         
         // Check for invalid measurements
-        if (std::isnan(disp))
+        if (std::isnan(disp) || disp <= 0)
         {
           pt.x = pt.y = pt.z = disp;
 
-          /*
+          /* TODO: Do something different here perhaps?
           Eigen3::Vector3d xyz;
           uvd_to_fake_depth(Eigen3::Vector3d(u, v, disp), xyz, 3.0);
 
@@ -166,10 +166,15 @@ public:
         {
           Eigen3::Vector3d xyz;
           uvd_to_xyz(Eigen3::Vector3d(u, v, disp), xyz);
-          
-          pt.x = xyz[0];
-          pt.y = xyz[1];
-          pt.z = xyz[2];
+
+          if (!pcl_isfinite (xyz[0]) || !pcl_isfinite (xyz[1]) || !pcl_isfinite (xyz[2]))
+            pt.x = pt.y = pt.z = -1;
+          else
+          {
+            pt.x = xyz[0];
+            pt.y = xyz[1];
+            pt.z = xyz[2];
+          }
         }
       }
     }
@@ -181,9 +186,8 @@ public:
     pcl::PointCloud<pcl::PointXYZ> downsampled_cloud;
     pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
     voxel_filter.setInputCloud(cloud);
-    voxel_filter.setLeafSize(0.1, 0.1, 0.1);
+    voxel_filter.setLeafSize(0.01, 0.01, 0.01);
     voxel_filter.setFilterFieldName ("z");
-//    voxel_filter.setFilterLimits (0.05, 5);
     voxel_filter.filter(downsampled_cloud);
 
     pub_points_.publish(downsampled_cloud);
