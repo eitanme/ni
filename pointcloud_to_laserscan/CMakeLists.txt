@@ -30,3 +30,5 @@ set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/lib)
 #target_link_libraries(example ${PROJECT_NAME})
 
 rosbuild_add_library(cloud_to_scan src/cloud_to_scan.cpp src/cloud_throttle.cpp)
+
+rosbuild_add_executable(disparity_to_cloud src/disparity_to_cloud.cpp)
